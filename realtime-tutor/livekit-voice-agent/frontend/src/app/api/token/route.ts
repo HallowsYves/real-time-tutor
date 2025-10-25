@@ -1,33 +1,32 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { AccessToken } from 'livekit-server-sdk';
-import { mustGet } from '@/lib/env';
+import { NextRequest } from "next/server";
+import { AccessToken } from "livekit-server-sdk";
 
-export async function GET(req: NextRequest) {
-  try {
-    const LIVEKIT_API_KEY = mustGet('LIVEKIT_API_KEY');
-    const LIVEKIT_API_SECRET = mustGet('LIVEKIT_API_SECRET');
-    const LIVEKIT_URL = mustGet('LIVEKIT_URL');
+export async function POST(_req: NextRequest) {
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const roomName = process.env.LIVEKIT_ROOM || "tutor-room";
 
-    const room = req.nextUrl.searchParams.get('room') ?? 'playground';
-    const user = req.nextUrl.searchParams.get('user') ?? `web-${Math.random().toString(36).slice(2)}`;
-
-    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-      identity: user,
-      ttl: '1h',
-    });
-    at.addGrant({
-      room,
-      roomJoin: true,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
-
-    return NextResponse.json({
-      token: await at.toJwt(),
-      url: LIVEKIT_URL,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: String(err?.message ?? err) }, { status: 500 });
+  if (!apiKey || !apiSecret) {
+    return new Response(
+      JSON.stringify({ error: "LIVEKIT_API_KEY or LIVEKIT_API_SECRET not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
+
+  const identity = `user-${Math.random().toString(36).slice(2, 10)}`;
+
+  const at = new AccessToken(apiKey, apiSecret, {
+    identity,
+  });
+
+  at.addGrant({
+    room: roomName,
+    roomJoin: true,
+    canPublish: true,
+    canSubscribe: true,
+  });
+
+  const token = await at.toJwt();
+
+  return Response.json({ token });
 }

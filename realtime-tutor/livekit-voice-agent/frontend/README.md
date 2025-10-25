@@ -34,3 +34,17 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## LiveKit Agent Embed
+
+This app includes a `/tutor` page that embeds a LiveKit Agent UI.
+
+### Setup
+
+1. Set environment:
+   ```bash
+   cp .env.local.example .env.local
+   # Fill LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_WS_URL, LIVEKIT_ROOM
+   ```
+
+POST /api/token returns a LiveKit room token used by the embed.
