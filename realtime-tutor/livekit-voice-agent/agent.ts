@@ -1,131 +1,73 @@
-import dotenv from 'dotenv';
-import { defineAgent, livekit, voice } from '@livekit/agents';
-import { BackgroundVoiceCancellation } from '@livekit/noise-cancellation-node';
-import * as livekitPipeline from '@livekit/agents-plugin-livekit';
+import { defineAgent, voice, cli, WorkerOptions, type JobContext, type JobProcess } from '@livekit/agents';
+import * as livekit from '@livekit/agents-plugin-livekit';
 import * as silero from '@livekit/agents-plugin-silero';
-import * as openai from '@livekit/agents-plugin-openai';
+import { BackgroundVoiceCancellation } from '@livekit/noise-cancellation-node';
+import dotenv from 'dotenv';
 
 dotenv.config({ path: '.env.local' });
 
-const mustGet = (key: string): string => {
-  const value = process.env[key];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${key}`);
-  }
-  return value;
+// Fail fast on missing envs you actually need right now.
+// For this STT-LLM-TTS setup, you need LIVEKIT_* and OPENAI_API_KEY (for gpt-4.1-mini).
+const mustGet = (k: string) => {
+  const v = process.env[k];
+  if (!v) throw new Error(`Missing required env: ${k}`);
+  return v;
 };
-
-const LIVEKIT_URL = mustGet('LIVEKIT_URL');
-const LIVEKIT_API_KEY = mustGet('LIVEKIT_API_KEY');
-const LIVEKIT_API_SECRET = mustGet('LIVEKIT_API_SECRET');
-
-const turnDetector = new (livekit as any).turnDetector.MultilingualModel();
-const noiseCancellation = new BackgroundVoiceCancellation();
+mustGet('LIVEKIT_URL'); mustGet('LIVEKIT_API_KEY'); mustGet('LIVEKIT_API_SECRET'); mustGet('OPENAI_API_KEY');
 
 export default defineAgent({
-  name: 'livekit-voice-agent',
-  prewarm: async () => {
-    const maybePrewarm =
-      (silero as any).prewarm ??
-      (silero as any).prewarmSileroVAD ??
-      (silero as any).SileroVAD?.prewarm;
-
-    if (typeof maybePrewarm === 'function') {
-      await maybePrewarm();
-      console.log('[prewarm] Silero VAD prewarmed');
-    } else if (typeof (silero as any).SileroVAD?.create === 'function') {
-      await (silero as any).SileroVAD.create();
-      console.log('[prewarm] Silero VAD create() invoked');
-    } else {
-      console.warn('[prewarm] Unable to locate Silero VAD prewarm helper; continuing');
-    }
+  // Pre-download & warm Silero VAD
+  prewarm: async (proc: JobProcess) => {
+    proc.userData.vad = await silero.VAD.load();
   },
-  entry: async (ctx) => {
-    const sessionFactory: any = (voice as any).AgentSession ?? (voice as any).VoiceAgentSession;
-    if (!sessionFactory) {
-      throw new Error('Unable to locate voice.AgentSession from @livekit/agents');
-    }
 
-    const session: any = new sessionFactory(ctx, {
-      logLevel: 'info',
+  entry: async (ctx: JobContext) => {
+    const vad = ctx.proc.userData.vad as silero.VAD;
+
+    const assistant = new voice.Agent({
+      instructions: 'You are a helpful voice AI assistant.',
     });
 
-    session.on?.('modelEvent', (ev: any) => {
-      if (ev?.type?.includes?.('transcription') || ev?.type === 'error') {
+    // —— STT-LLM-TTS pipeline (robust path) ——
+    const session = new voice.AgentSession({
+      vad,
+      stt: 'assemblyai/universal-streaming:en',
+      llm: 'openai/gpt-4.1-mini',
+      tts: 'cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc',
+      turnDetection: new livekit.turnDetector.MultilingualModel(),
+    });
+
+    // —— If you want to try OpenAI Realtime again later, comment the block above and uncomment below ——
+    /*
+    import * as openai from '@livekit/agents-plugin-openai';
+    const session = new voice.AgentSession({
+      llm: new openai.realtime.RealtimeModel({
+        voice: 'coral',
+        // Be explicit about STT model to avoid default/account quirks:
+        inputAudioTranscription: { model: 'gpt-4o-transcribe' }, // or 'gpt-4o-mini-transcribe'
+      }),
+    });
+    */
+
+    await session.start({
+      agent: assistant,
+      room: ctx.room,
+      inputOptions: { noiseCancellation: BackgroundVoiceCancellation() },
+    });
+
+    // Optional: surface model/server events for debugging
+    session.on('modelEvent', (ev) => {
+      if (ev?.type === 'error' || (typeof ev?.type === 'string' && ev.type.includes('transcription'))) {
         console.error('[modelEvent]', JSON.stringify(ev));
       }
     });
 
-    session.on?.('speechStarted', () => {
-      console.log('[session] Speech started');
-    });
-    session.on?.('speechEnded', () => {
-      console.log('[session] Speech ended');
-    });
+    await ctx.connect();
 
-    const pipelineFactory: any =
-      (livekitPipeline as any).sttLlmTtsPipeline ?? (livekitPipeline as any).voicePipeline;
-
-    const pipelineOptions =
-      typeof pipelineFactory === 'function'
-        ? pipelineFactory({
-            stt: 'assemblyai/universal-streaming:en',
-            llm: 'openai/gpt-4.1-mini',
-            tts: 'cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc',
-            turnDetection,
-            noiseCancellation,
-          })
-        : {
-            stt: 'assemblyai/universal-streaming:en',
-            llm: 'openai/gpt-4.1-mini',
-            tts: 'cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc',
-            turnDetection,
-            noiseCancellation,
-          };
-
-    console.log('[worker] registering with LiveKit Cloud...');
-    const connection = await (ctx as any).connect?.({
-      url: LIVEKIT_URL,
-      apiKey: LIVEKIT_API_KEY,
-      apiSecret: LIVEKIT_API_SECRET,
-    });
-    console.log('[worker] registered', connection?.workerSid ?? 'without worker SID');
-
-    await session.start?.({
-      pipeline: pipelineOptions,
-      stt: 'assemblyai/universal-streaming:en',
-      llm: 'openai/gpt-4.1-mini',
-      tts: 'cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc',
-      turnDetection,
-      noiseCancellation,
-    });
-    console.log('[session] Voice session started, joining room...');
-
-    await (ctx as any).connect?.();
-    console.log('[session] Connected to LiveKit room');
-
-    await session.generateReply?.('Greet the user and let them know you are ready to help with tutoring.');
-
-    // TODO: Swap to Claude for tutoring-specific reasoning (e.g., import Anthropic plugin or call external tutoring service).
-
-    // TODO: POST transcripts and agent decisions to a future /api/learning-plan endpoint powered by Letta to build adaptive lesson plans.
-
-    /*
-    // Uncomment below to try OpenAI Realtime; ensure OPENAI_API_KEY is set and STT model configured appropriately.
-    const realtimeModel = new (openai as any).realtime.RealtimeModel({
-      voice: 'coral',
-      inputAudioTranscription: { model: 'gpt-4o-transcribe' },
-    });
-    await session.start?.({
-      model: realtimeModel,
-      turnDetection,
-      noiseCancellation,
-    });
-    */
-
-    session.on?.('roomJoined', (room: any) => {
-      console.log('[session] Joined room', room?.name ?? room?.sid ?? '<unknown>');
-    });
+    await session.generateReply({
+      instructions: 'Greet the user and offer your assistance.',
+    }).waitForPlayout();
   },
 });
 
+cli.runApp(new WorkerOptions({ agent: new URL(import.meta.url).pathname }));
